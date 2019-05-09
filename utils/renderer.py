@@ -328,4 +328,8 @@ class Renderer(object):
             vc=albedo,
             light_color=np.array([.7, .7, .7]))
 
+        self.renderer.glMode = 'glfw'
+        self.renderer.msaa = True
+        self.renderer.initGL()
+
         return self.renderer.r

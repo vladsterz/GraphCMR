@@ -6,6 +6,7 @@ from __future__ import division
 import torch
 import torch.nn as nn
 import numpy as np
+import sys
 try:
     import cPickle as pickle
 except ImportError:
@@ -19,7 +20,12 @@ class SMPL(nn.Module):
     def __init__(self, model_file=cfg.SMPL_FILE):
         super(SMPL, self).__init__()
         with open(model_file, 'rb') as f:
-            smpl_model = pickle.load(f)
+            if(sys.version_info > (3,0)):
+                u = pickle._Unpickler(f)
+                u.encoding = 'latin1'
+                smpl_model = u.load()
+            else:
+                smpl_model = pickle.load(f)
         J_regressor = smpl_model['J_regressor'].tocoo()
         row = J_regressor.row
         col = J_regressor.col

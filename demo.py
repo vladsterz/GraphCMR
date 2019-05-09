@@ -36,8 +36,10 @@ import json
 
 from utils import Mesh
 from models import CMR
+from models import smpl
 from utils.imutils import crop
 from utils.renderer import Renderer
+from opendr.helpers import createRenderer
 import config as cfg
 
 parser = argparse.ArgumentParser()
@@ -45,7 +47,17 @@ parser.add_argument('--checkpoint', default=None, help='Path to pretrained check
 parser.add_argument('--img', type=str, required=True, help='Path to input image')
 parser.add_argument('--bbox', type=str, default=None, help='Path to .json file containing bounding box coordinates')
 parser.add_argument('--openpose', type=str, default=None, help='Path to .json containing openpose detections')
-parser.add_argument('--outfile', type=str, default=None, help='Filename of output images. If not set use input filename.')
+parser.add_argument('--outfile', type=str, default="", help='Filename of output images. If not set use input filename.')
+parser.add_argument('--render', type=bool, default=False, help='Enable if want to use renderer (currently not working).')
+
+def write_obj(verts, faces, file_name):
+    '''Writes a mesh to .obj file'''
+    with open(file_name, 'w') as fp:
+      for v in verts.view(-1,3):
+        fp.write('v %f %f %f\n' % (v[0], v[1], v[2]))
+
+      for f in faces + 1:
+        fp.write('f %d %d %d\n' % (f[0], f[1], f[2]))
 
 def bbox_from_openpose(openpose_file, rescale=1.2, detection_thresh=0.2):
     """Get center and scale for bounding box from openpose detections."""
@@ -101,6 +113,7 @@ def process_image(img_file, bbox_file, openpose_file, input_res=224):
 if __name__ == '__main__':
     args = parser.parse_args()
     
+    smpler = smpl.SMPL("data/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl")
     # Load model
     mesh = Mesh()
     # Our pretrained networks have 5 residual blocks with 256 channels. 
@@ -111,12 +124,20 @@ if __name__ == '__main__':
 
     # Setup renderer for visualization
     renderer = Renderer()
+    
+    #renderer = createRendererHere()
 
     # Preprocess input image and generate predictions
     img, norm_img = process_image(args.img, args.bbox, args.openpose, input_res=cfg.INPUT_RES)
     with torch.no_grad():
-        pred_vertices, pred_vertices_smpl, pred_camera, _, _ = model(norm_img.cuda())
-        
+        pred_vertices, pred_vertices_smpl, pred_camera, pred_pose, pred_shape = model(norm_img.cuda())
+    
+    b,cols,rows = pred_vertices.shape
+    camera_offset = pred_camera.repeat(cols,1).unsqueeze(0).cuda()
+
+    write_obj(pred_vertices_smpl + camera_offset,smpler.faces,args.outfile + "_mesh_smpl.obj")
+    write_obj(pred_vertices + camera_offset,smpler.faces,args.outfile + "_mesh.obj")
+
     # Calculate camera parameters for rendering
     camera_translation = torch.stack([pred_camera[:,1], pred_camera[:,2], 2*cfg.FOCAL_LENGTH/(cfg.INPUT_RES * pred_camera[:,0] +1e-9)],dim=-1)
     camera_translation = camera_translation[0].cpu().numpy()
@@ -124,15 +145,19 @@ if __name__ == '__main__':
     pred_vertices_smpl = pred_vertices_smpl[0].cpu().numpy()
     img = img.permute(1,2,0).cpu().numpy()
 
-    # Render non-parametric shape
-    img_gcnn = renderer.render(pred_vertices, mesh.faces.cpu().numpy(),
-                               camera_t=camera_translation,
-                               img=img, use_bg=True, body_color='pink')
-    
-    # Render parametric shape
-    img_smpl = renderer.render(pred_vertices_smpl, mesh.faces.cpu().numpy(),
-                               camera_t=camera_translation,
-                               img=img, use_bg=True, body_color='light_blue')
+    if args.renderer:
+        #Render non-parametric shape
+        img_gcnn = renderer.render(pred_vertices, mesh.faces.cpu().numpy(),
+                                camera_t=camera_translation,
+                                img=img, use_bg=True, body_color='pink')
+        cv2.imwrite(outfile + '_gcnn.png', 255 * img_gcnn[:,:,::-1])
+
+        
+        # Render parametric shape
+        img_smpl = renderer.render(pred_vertices_smpl, mesh.faces.cpu().numpy(),
+                                camera_t=camera_translation,
+                                img=img, use_bg=True, body_color='light_blue')
+        cv2.imwrite(outfile + '_smpl.png', 255 * img_smpl[:,:,::-1])
     
     # Render side views
     aroundy = cv2.Rodrigues(np.array([0, np.radians(90.), 0]))[0]
@@ -140,20 +165,21 @@ if __name__ == '__main__':
     center_smpl = pred_vertices.mean(axis=0)
     rot_vertices = np.dot((pred_vertices - center), aroundy) + center
     rot_vertices_smpl = np.dot((pred_vertices_smpl - center_smpl), aroundy) + center_smpl
-    
-    # Render non-parametric shape
-    img_gcnn_side = renderer.render(rot_vertices, mesh.faces.cpu().numpy(),
-                               camera_t=camera_translation,
-                               img=np.ones_like(img), use_bg=True, body_color='pink')
-    
-    # Render parametric shape
-    img_smpl_side = renderer.render(rot_vertices_smpl, mesh.faces.cpu().numpy(),
-                               camera_t=camera_translation,
-                               img=np.ones_like(img), use_bg=True, body_color='light_blue')
-    outfile = args.img.split('.')[0] if args.outfile is None else args.outfile
 
-    # Save reconstructions
-    cv2.imwrite(outfile + '_gcnn.png', 255 * img_gcnn[:,:,::-1])
-    cv2.imwrite(outfile + '_smpl.png', 255 * img_smpl[:,:,::-1])
-    cv2.imwrite(outfile + '_gcnn_side.png', 255 * img_gcnn_side[:,:,::-1])
-    cv2.imwrite(outfile + '_smpl_side.png', 255 * img_smpl_side[:,:,::-1])
+    if args.render:    
+        # Render non-parametric shape
+        img_gcnn_side = renderer.render(rot_vertices, mesh.faces.cpu().numpy(),
+                                camera_t=camera_translation,
+                                img=np.ones_like(img), use_bg=True, body_color='pink')
+        cv2.imwrite(outfile + '_gcnn_side.png', 255 * img_gcnn_side[:,:,::-1])
+
+
+        # Render parametric shape
+        img_smpl_side = renderer.render(rot_vertices_smpl, mesh.faces.cpu().numpy(),
+                                camera_t=camera_translation,
+                                img=np.ones_like(img), use_bg=True, body_color='light_blue')
+        outfile = args.img.split('.')[0] if args.outfile is None else args.outfile
+        cv2.imwrite(outfile + '_smpl_side.png', 255 * img_smpl_side[:,:,::-1])
+
+    
+    
